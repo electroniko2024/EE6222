@@ -1,0 +1,44 @@
+[
+  {
+    "representation": "Raw",
+    "classifier": "kNN",
+    "dimension": 64,
+    "parameter": 1,
+    "validation_accuracy": 0.9888888888888889
+  },
+  {
+    "representation": "Raw",
+    "classifier": "Ridge",
+    "dimension": 64,
+    "parameter": 1.0,
+    "validation_accuracy": 0.9222222222222223
+  },
+  {
+    "representation": "PCA",
+    "classifier": "kNN",
+    "dimension": 24,
+    "parameter": 5,
+    "validation_accuracy": 0.9888888888888889
+  },
+  {
+    "representation": "PCA",
+    "classifier": "Ridge",
+    "dimension": 32,
+    "parameter": 10.0,
+    "validation_accuracy": 0.925
+  },
+  {
+    "representation": "LDA",
+    "classifier": "kNN",
+    "dimension": 9,
+    "parameter": 1,
+    "validation_accuracy": 0.975
+  },
+  {
+    "representation": "LDA",
+    "classifier": "Ridge",
+    "dimension": 9,
+    "parameter": 0.01,
+    "validation_accuracy": 0.9166666666666666
+  }
+]

@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Assignment 2 – Video Generation Network</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>Designing a Video Generation Network</h1>
+
+<p>This proposal describes a small research prototype that makes short, silent clips of Donald Trump in neutral settings, such as walking across a stage or gesturing at a podium. The clips are for teaching how video generation works and how synthetic media should be labelled. The system therefore has no audio and does not show real or invented news events, and every clip it exports carries a visible label.</p>
+
+<h2>Part 1. My proposal</h2>
+
+<h3>1.1 Data</h3>
+<p>I would collect footage from two sources. The main one is official recordings made by the U.S. federal government. Works that federal employees create as part of their job are not covered by U.S. copyright<sup>[17]</sup>, but some government pages embed pool or network footage, so each clip is checked before use. The second source is footage licensed for research from news archives or stock libraries, used to fill gaps. Scraped reposts are not used. For each clip I record the source, rights holder, licence or legal basis, collection date and permitted use. Likeness and platform terms are not covered by copyright, so the plan goes through the university's ethics or legal review before collection starts.</p>
+<p>The target after filtering is about 300 to 1,000 clips of 6 to 10 seconds, roughly half an hour to three hours in total. They come from at least 40 events across different years, camera angles and lighting, plus 20 to 50 clear reference stills. Because the backbone is only fine-tuned with low-rank adapters, variety matters more than volume. The final count depends on how much footage can be licensed.</p>
+<p>Preprocessing is a chain of standard tools. FFmpeg strips the audio and PySceneDetect splits the footage into shots. RetinaFace<sup>[20]</sup> finds and tracks faces, and each tracked face is compared with the reference stills using face embeddings<sup>[6]</sup> to make sure it is the right person, with unclear cases checked by hand. Clips with small or blurred faces, heavy occlusion or burned-in captions are dropped. The rest are resampled to 8 fps and cut to the backbone's native format of 49 frames at 720×480, which is about six seconds<sup>[2]</sup>. Full frames are kept for training, and the face boxes are saved so that the identity loss knows where to crop. A vision-language model writes the captions, which describe only what can be seen, such as shot type, lighting, clothing and movement. I would spot-check them and remove any quotes or political claims.</p>
+<p>The data is split 70/15/15 by event and recording date, so frames from the same speech never end up in both the training and the test set. Perceptual hashing removes near-duplicate frames across the splits. Two prompt sets stay out of training altogether. One holds unseen scenes and camera moves for evaluation, and the other is a red-team set of requests the system should refuse.</p>
+
+<h3>1.2 Network architecture</h3>
+<figure>
+<svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif" font-size="11">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#456"/></marker></defs>
+  <!-- inputs -->
+  <rect x="8" y="14" width="128" height="40" rx="5" fill="#e8eff4" stroke="#6b8799"/><text x="72" y="30" text-anchor="middle" font-weight="bold">Text prompt</text><text x="72" y="45" text-anchor="middle" font-size="9.5">(allow-listed template)</text>
+  <rect x="8" y="78" width="128" height="40" rx="5" fill="#e8eff4" stroke="#6b8799"/><text x="72" y="94" text-anchor="middle" font-weight="bold">Reference stills</text><text x="72" y="109" text-anchor="middle" font-size="9.5">(licensed, 1–4 images)</text>
+  <rect x="8" y="142" width="128" height="40" rx="5" fill="#e8eff4" stroke="#6b8799"/><text x="72" y="158" text-anchor="middle" font-weight="bold">Noise + seed</text><text x="72" y="173" text-anchor="middle" font-size="9.5">(video latent)</text>
+  <!-- encoders -->
+  <rect x="170" y="14" width="140" height="40" rx="5" fill="#fff" stroke="#6b8799"/><text x="240" y="30" text-anchor="middle" font-weight="bold">Text encoder</text><text x="240" y="45" text-anchor="middle" font-size="9.5">(frozen, from backbone)</text>
+  <rect x="170" y="70" width="140" height="56" rx="5" fill="#fdf1e3" stroke="#c98a3c"/><text x="240" y="86" text-anchor="middle" font-weight="bold">Identity encoder</text><text x="240" y="100" text-anchor="middle" font-size="9.5">ArcFace<tspan baseline-shift="super" font-size="7">[6]</tspan> + CLIP image<tspan baseline-shift="super" font-size="7">[10]</tspan></text><text x="240" y="114" text-anchor="middle" font-size="9.5">→ projector → ID tokens</text>
+  <!-- backbone -->
+  <rect x="345" y="10" width="200" height="176" rx="6" fill="#eef6ee" stroke="#5c8f5c"/>
+  <text x="445" y="28" text-anchor="middle" font-weight="bold">CogVideoX-5B diffusion transformer<tspan baseline-shift="super" font-size="7">[1]</tspan></text>
+  <text x="445" y="46" text-anchor="middle" font-size="9.5">text + video tokens, 3-D spatio-temporal</text>
+  <text x="445" y="58" text-anchor="middle" font-size="9.5">full attention (frozen base weights)</text>
+  <rect x="360" y="70" width="170" height="30" rx="4" fill="#fff" stroke="#5c8f5c"/><text x="445" y="89" text-anchor="middle" font-size="9.5">+ LoRA on attention projections<tspan baseline-shift="super" font-size="7">[4]</tspan></text>
+  <rect x="360" y="108" width="170" height="40" rx="4" fill="#fdf1e3" stroke="#c98a3c"/><text x="445" y="124" text-anchor="middle" font-size="9.5">+ zero-initialised identity</text><text x="445" y="138" text-anchor="middle" font-size="9.5">cross-attention (IP-Adapter style<tspan baseline-shift="super" font-size="7">[5]</tspan>)</text>
+  <text x="445" y="172" text-anchor="middle" font-size="9.5">same ID tokens shared by all 49 frames</text>
+  <!-- decoder / export -->
+  <rect x="580" y="14" width="172" height="40" rx="5" fill="#fff" stroke="#6b8799"/><text x="666" y="30" text-anchor="middle" font-weight="bold">3-D VAE decoder</text><text x="666" y="45" text-anchor="middle" font-size="9.5">49 frames · 720×480 · 8 fps</text>
+  <rect x="580" y="78" width="172" height="52" rx="5" fill="#f6e9ef" stroke="#a5587a"/><text x="666" y="95" text-anchor="middle" font-weight="bold">Export gate</text><text x="666" y="109" text-anchor="middle" font-size="9.5">burned-in "AI-GENERATED" label</text><text x="666" y="122" text-anchor="middle" font-size="9.5">+ C2PA manifest<tspan baseline-shift="super" font-size="7">[18]</tspan> + log</text>
+  <rect x="580" y="146" width="172" height="36" rx="5" fill="#e8eff4" stroke="#6b8799"/><text x="666" y="168" text-anchor="middle" font-weight="bold">Silent labelled clip</text>
+  <!-- arrows -->
+  <line x1="136" y1="34" x2="168" y2="34" stroke="#456" marker-end="url(#a)"/>
+  <line x1="136" y1="98" x2="168" y2="98" stroke="#456" marker-end="url(#a)"/>
+  <line x1="310" y1="34" x2="343" y2="34" stroke="#456" marker-end="url(#a)"/>
+  <line x1="310" y1="110" x2="358" y2="126" stroke="#456" marker-end="url(#a)"/>
+  <line x1="136" y1="162" x2="343" y2="162" stroke="#456" marker-end="url(#a)"/>
+  <line x1="545" y1="34" x2="578" y2="34" stroke="#456" marker-end="url(#a)"/>
+  <line x1="666" y1="54" x2="666" y2="76" stroke="#456" marker-end="url(#a)"/>
+  <line x1="666" y1="130" x2="666" y2="144" stroke="#456" marker-end="url(#a)"/>
+  <!-- training losses -->
+  <rect x="8" y="204" width="744" height="38" rx="5" fill="#fafafa" stroke="#999" stroke-dasharray="4 3"/>
+  <text x="20" y="220" font-weight="bold">Training only:</text>
+  <text x="20" y="235" font-size="9.5">L = L_diffusion + λ_id·L_id (ArcFace cosine on predicted clean frames, low-noise steps) + λ_t·L_temp (RAFT-flow warping error<tspan baseline-shift="super" font-size="7">[8]</tspan>, optional, ablated)</text>
+  <line x1="445" y1="186" x2="445" y2="202" stroke="#999" stroke-dasharray="3 2"/>
+</svg>
+</figure>
+<div class="caption">Figure 1. Proposed architecture. The identity path is orange, the pretrained backbone with trainable adapters is green, and the disclosure step is pink.</div>
+<p>I would build on CogVideoX-5B<sup>[1, 2]</sup>, an open text-to-video model. A 3-D VAE compresses the video in both space and time, and a diffusion transformer processes the text and video tokens together with full spatio-temporal attention to generate 49 frames at 720×480. I picked a text-to-video model because the scene has to be controlled through restricted prompts. For early tests, Wan2.1-T2V-1.3B<sup>[3]</sup> (Apache-2.0, 480p) is a much cheaper option.</p>
+<p>The model takes three inputs: a prompt built from an approved template, one to four licensed reference stills, and a random seed. It outputs a silent 49-frame clip. Before anything is saved, an export step burns a visible label into every frame and attaches a C2PA provenance manifest<sup>[18]</sup>.</p>
+<p>For identity, the reference stills go through two encoders. ArcFace<sup>[6]</sup> gives a compact identity embedding, and the CLIP image encoder<sup>[10]</sup> adds appearance detail from the face crop. A small projector turns these features into identity tokens. CogVideoX has no cross-attention layers of its own, so the tokens enter through added ones modelled on IP-Adapter's decoupled cross-attention<sup>[5]</sup>. The added layers are initialised to zero, so at the start of training the model behaves exactly like the original backbone. LoRA<sup>[4]</sup> on the attention projections then adapts the backbone to the subject's appearance. As an outside point of comparison I would also test ConsisID<sup>[9]</sup>, a published identity-preserving text-to-video model that needs no fine-tuning.</p>
+<p>Part of the temporal consistency comes free, because the backbone's joint attention already lets every frame see every other frame. The identity tokens help too, since all 49 frames receive exactly the same identity signal. On top of this I would try a warping loss. A short window of the predicted frames is decoded and downsampled, each frame is warped with the optical flow that RAFT<sup>[8]</sup> estimates on the real clip, and the difference is penalised. This loss stays in the final model only if the ablations show that it helps.</p>
+<div class="eq">L = L<sub>diff</sub> + λ<sub>id</sub> · (1 − cos(f<sub>ArcFace</sub>(x̂<sub>0</sub>), e<sub>ref</sub>)) + λ<sub>t</sub> · L<sub>warp</sub></div>
+<p>The identity term is computed only at low-noise timesteps, because at high noise the predicted clean frames x̂<sub>0</sub> do not yet show a recognisable face. Both extra losses need decoded pixels, and backpropagating through the VAE decoder costs memory on top of the LoRA run itself. They share the same few decoded frames and run only on a fraction of the training steps. The identity weight stays small, since pushing face similarity too hard tends to freeze the expression. For the same reason, identity is measured at test time with a different network, FaceNet<sup>[7]</sup>, so the model is not graded by the network it was trained against.</p>
+
+<h3>1.3 Resources</h3>
+<p>The choice of 80 GB cards follows from the CogVideoX-5B model card, which lists about 63 GB per GPU for LoRA fine-tuning at batch size 1 and 80 GB at batch size 2<sup>[2]</sup>.</p>
+<table>
+<tr><th>Item</th><th>Plan</th></tr>
+<tr><td>GPUs</td><td>4 × 80 GB (A100 or H100), so that several adapter runs and ablations can run in parallel, plus 1 GPU for the pilot</td></tr>
+<tr><td>Software</td><td>PyTorch, Diffusers, PEFT, FFmpeg, PySceneDetect, InsightFace, torchvision (RAFT), C2PA tools and an experiment tracker</td></tr>
+<tr><td>Pretrained models</td><td>CogVideoX-5B, Wan2.1-T2V-1.3B, ArcFace and RetinaFace from InsightFace (licensed for non-commercial research, which fits this project), CLIP, RAFT and FaceNet</td></tr>
+<tr><td>Compute</td><td>4 GPUs × 24–72 h = 96–288 GPU-hours, about US$200–1,500 at US$2–5 per GPU-hour</td></tr>
+</table>
+
+<h3>1.4 Design rationale</h3>
+<p>I adapt a pretrained model instead of training one, because LoRA and the identity module train only a small share of the parameters and this fits a course budget. The downside is that the system keeps the backbone's limits: six-second clips at 720×480 and any biases it already has. This also assumes that 80 GB GPUs are available, that enough footage can be licensed and that the ethics review approves the project.</p>
+<p>Identity and content are kept apart. The identity tokens say who the person is, and the text says what happens in the scene. With only a few training views, the adapter may copy the pose or expression of the reference image, which is why I would compare adapter-only, LoRA-only and combined versions. Splitting the data by event leaves less for training, but random frame splits would leak near-identical frames into the test set and inflate the scores.</p>
+<p>The clips are silent, prompts come from an approved list, and requests about real events or elections are refused. Every export carries a burned-in label, C2PA metadata and a log entry, and risk is managed following the NIST AI RMF<sup>[19]</sup>. A determined person can strip labels and metadata, so access to the system is also limited to the research group.</p>
+
+<h3>1.5 Evaluation</h3>
+<table>
+<tr><th>Aspect</th><th>Measure</th><th>Purpose</th></tr>
+<tr><td>Identity</td><td>FaceNet cosine similarity to held-out stills, per frame and across frames</td><td>Uses a different network from the training loss</td></tr>
+<tr><td>Temporal</td><td>RAFT warping error; VBench subject consistency, temporal flickering and motion smoothness<sup>[11]</sup></td><td>Frame-to-frame coherence</td></tr>
+<tr><td>Motion</td><td>VBench dynamic degree<sup>[11]</sup></td><td>Catches clips that barely move</td></tr>
+<tr><td>Prompt</td><td>CLIP text–frame similarity<sup>[10]</sup></td><td>Checks that the scene matches the prompt</td></tr>
+<tr><td>Distribution</td><td>FVD<sup>[12]</sup> on held-out events</td><td>Secondary only, because FVD favours per-frame quality<sup>[13]</sup> and shifts with sample size<sup>[14]</sup></td></tr>
+<tr><td>Human</td><td>Blinded ratings by at least three raters</td><td>Identity, natural motion and label visibility</td></tr>
+<tr><td>Safety</td><td>Refusal rate on the red-team set and a label check on every export</td><td>Must pass</td></tr>
+</table>
+<p>All variants run on the same held-out events, prompts and seeds. These are the plain backbone, ConsisID, and four ablations that remove the identity loss, remove the warping loss, use only the adapter, or use only LoRA.</p>
+
+<h2>Part 2. AI-assisted proposal and critical comparison</h2>
+<p>Once Part 1 was finished, I gave ChatGPT 6.1 sol the following prompt in English on 10 November 2026: <i>"Propose a practical educational/research system for clearly labelled, silent synthetic videos depicting Donald Trump. Cover data, identity and temporal consistency, hardware budget, evaluation, and misuse controls; state assumptions for a short 720×480, 8 fps output."</i> The prompt uses the same output format as my design, so the two proposals answer the same brief. The full answer is in the Appendix.</p>
+<p>ChatGPT proposed a frozen image-to-video model followed by automatic checks and human approval. It assumes a six-second clip of 48 frames at 720×480 and 8 fps, with one person, a fixed camera, a neutral background and small movements, and with "AI-GENERATED — NOT REAL FOOTAGE" on every frame. The data is 20 to 40 rights-cleared photographs split by photo session, and no training set is needed. Each clip is generated by CogVideoX-5B-I2V from one approved portrait and a prompt, without fine-tuning. The hardware is one 24 GB GPU with CPU offloading and VAE tiling, or 20 cloud GPU-hours for about US$20–80. About 30 generations are evaluated, failures included. Identity is measured with face embeddings against held-out photos, temporal quality with motion-compensated differences and landmark stability, and two reviewers score every clip. Misuse is handled through approved scenes and motions, burned-in labels with signed provenance metadata, logged and rate-limited access, and a withdrawal process.</p>
+
+<h3>2.1 Similarities and differences</h3>
+<table>
+<tr><th></th><th>My proposal</th><th>ChatGPT's proposal</th><th>Comparison</th></tr>
+<tr><td>Data</td><td>300–1,000 licensed video clips and 20–50 stills, a rights ledger with likeness review, split by event, plus prompt and red-team sets</td><td>20–40 rights-cleared photographs split by session, held-out sessions for evaluation, a manifest linking every output to its inputs and review decision</td><td>Both keep rights records and split by event. ChatGPT needs no video because it trains nothing, and its per-output manifest is more thorough than my log</td></tr>
+<tr><td>Architecture</td><td>Text-to-video CogVideoX-5B with LoRA and zero-initialised identity cross-attention, 49 frames at 720×480</td><td>Frozen CogVideoX-5B-I2V conditioned on one portrait and a prompt, 49 frames cut to 48, no added modules</td><td>Same model family and output format. Mine adds identity tokens and LoRA, while ChatGPT relies on image conditioning alone and has no fallback if identity is weak</td></tr>
+<tr><td>Resources</td><td>4 × 80 GB, 96–288 GPU-hours, US$200–1,500 for adapter training</td><td>1 × 24 GB GPU (48 GB preferred), 64 GB RAM, 1–2 TB SSD, a US$2,000–3,500 workstation or US$20–80 of cloud time</td><td>The budgets cover different work, training in mine and inference in ChatGPT's. It also lists RAM and storage, which I left out</td></tr>
+<tr><td>Evaluation</td><td>FaceNet identity score, VBench, CLIP, FVD as a secondary metric, three or more blinded raters, a red-team test and ablations</td><td>About 30 generations with failures kept, median and worst-frame identity with calibrated thresholds, drift, landmark stability, two reviewers, delivery checks</td><td>ChatGPT reports identity more carefully. Mine has baselines, ablations and standard benchmarks that others can reproduce</td></tr>
+<tr><td>Safety</td><td>Silent output, approved prompts, visible label, C2PA, logs and ethics review</td><td>Approved scenes and motions, label burned in after generation, research ID, signed provenance, recompression test, rate limits, withdrawal process</td><td>Very similar. ChatGPT adds rate limits, a label test after recompression and a withdrawal process</td></tr>
+</table>
+
+<h3>2.2 Weaknesses and missing details</h3>
+<ol>
+<li>The plan stops where the identity problem would start. The 24 GB figure is credible for inference, because the CogVideoX model card lists about 5 GB with all memory optimisations on and roughly three times that with them off<sup>[2]</sup>. The trouble comes after the baseline. Everything depends on image conditioning being good enough, and the misuse section already talks about protecting "any future identity-specific weights". If conditioning falls short, the obvious next step is LoRA fine-tuning, which the I2V model card puts at 78 GB per GPU at batch size 1<sup>[15]</sup>. A 24 GB or 48 GB machine cannot do that, and 20 to 40 stills are not training data for a video model. ChatGPT names the next step but gives it no hardware, data or budget.</li>
+<li>The evaluation has nothing to compare against. ChatGPT tests one system, so its numbers cannot show what reference conditioning adds or whether another method would do better, although its own research question is about how well reference conditioning works. I read the evaluation section for a baseline, a control condition or a standard benchmark and found none. The two reviewers score independently, but no measure of agreement between them is planned, and 30 generations spread over several portraits, prompts and seeds leave only a few clips per condition. Its temporal measures are sensible but not defined closely enough to reproduce, since it does not say which flow method or perceptual metric it means. VBench<sup>[11]</sup> and a text-only control run would fix most of this.</li>
+<li>The licence check is left for later, although it takes a few minutes. ChatGPT writes "Review its model license before adoption". I read the CogVideoX licence<sup>[16]</sup>. It allows free use for academic research, requires registration for commercial use, is governed by Chinese law and forbids any use that may "infringe upon the rights and interests of human beings". It says nothing about impersonation or labelling. The licence does not block this project, but it leaves the likeness question entirely to the project's own legal review, and that is what the proposal should have said.</li>
+</ol>
+
+<h3>2.3 What I would take from ChatGPT's proposal</h3>
+<p>Several of ChatGPT's suggestions are better than what I had. The most useful is its identity reporting. Instead of one average similarity it reports the median, the worst frame and the drift over time, and it sets the threshold from real pairs of the same person and of different people instead of using a fixed cosine cut-off. I will report my FaceNet score the same way. I will also keep failed generations in the results and report the cost per accepted clip including rejected attempts. Its per-output manifest, its test of label readability after resizing and recompression, and its rule that unlabelled intermediates and identity weights stay restricted are simple additions that I would take over unchanged.</p>
+<p>I would adopt its frozen baseline in a modified form. CogVideoX-5B-I2V comes from the same family as my backbone and produces the same 49 frames at 720×480 and 8 fps, so it can sit next to the plain backbone and ConsisID<sup>[9]</sup> as a third tuning-free baseline and be scored with the same metrics. I would run these baselines first and train the identity adapter only if they miss a threshold fixed in advance. Unlike ChatGPT, I would have the adapter design and the 80 GB budget ready for that step. I would not take its 24 GB hardware, which suits its plan but not mine, and I would keep three blinded raters instead of two. Its warning that low motion scores can reward frozen clips is the same problem my VBench dynamic-degree measure is there to catch, so the two will be reported together.</p>
+
+<h2>Part 3. Conclusion</h2>
+<p>The calibrated identity threshold, the worst-frame score, the label test after recompression and the cost per accepted clip in my plan all came from ChatGPT. They are practical details that I had not thought of, and each one makes my results harder to overstate. AI tools can also save time during the build, for example by drafting the preprocessing and training scripts, writing the evaluation and red-team prompts, and captioning training clips. Asking an AI to look for holes in a design, such as how a metric could be gamed, is another quick way to find problems, and ChatGPT's remark about frozen clips is an example.</p>
+<p>Checking the answer was easy because it named a real model, and the frame count, resolution and frame rate it gave for CogVideoX-5B-I2V match the model card<sup>[15]</sup>. Its weaknesses were in what it left out. It mentions identity weights without budgeting the training they need, and its evaluation has no comparison. Neither shows up in any single sentence. They appear only when the plan is read as a whole and checked against the model card and against its own research question. I would use AI for drafting and for the details I tend to forget, and make the design decisions and the checks against primary sources myself.</p>
+
+<h2>References</h2>
+<ol class="refs">
+<li>Yang, Z., Teng, J., Zheng, W., et al. (2025). CogVideoX: Text-to-Video Diffusion Models with an Expert Transformer. ICLR 2025. arXiv:2408.06072.</li>
+<li>THUDM (now zai-org). CogVideoX-5b model card. huggingface.co/zai-org/CogVideoX-5b (accessed 9 Nov 2026).</li>
+<li>Team Wan, et al. (2025). Wan: Open and Advanced Large-Scale Video Generative Models. arXiv:2503.20314; github.com/Wan-Video/Wan2.1.</li>
+<li>Hu, E. J., Shen, Y., Wallis, P., et al. (2022). LoRA: Low-Rank Adaptation of Large Language Models. ICLR 2022. arXiv:2106.09685.</li>
+<li>Ye, H., Zhang, J., Liu, S., Han, X., Yang, W. (2023). IP-Adapter: Text Compatible Image Prompt Adapter for Text-to-Image Diffusion Models. arXiv:2308.06721.</li>
+<li>Deng, J., Guo, J., Xue, N., Zafeiriou, S. (2019). ArcFace: Additive Angular Margin Loss for Deep Face Recognition. CVPR 2019. arXiv:1801.07698.</li>
+<li>Schroff, F., Kalenichenko, D., Philbin, J. (2015). FaceNet: A Unified Embedding for Face Recognition and Clustering. CVPR 2015. arXiv:1503.03832.</li>
+<li>Teed, Z., Deng, J. (2020). RAFT: Recurrent All-Pairs Field Transforms for Optical Flow. ECCV 2020. arXiv:2003.12039.</li>
+<li>Yuan, S., Huang, J., He, X., et al. (2025). Identity-Preserving Text-to-Video Generation by Frequency Decomposition (ConsisID). CVPR 2025. arXiv:2411.17440.</li>
+<li>Radford, A., Kim, J. W., Hallacy, C., et al. (2021). Learning Transferable Visual Models From Natural Language Supervision (CLIP). ICML 2021. arXiv:2103.00020.</li>
+<li>Huang, Z., He, Y., Yu, J., Zhang, F., et al. (2024). VBench: Comprehensive Benchmark Suite for Video Generative Models. CVPR 2024. arXiv:2311.17982.</li>
+<li>Unterthiner, T., van Steenkiste, S., Kurach, K., et al. (2018). Towards Accurate Generative Models of Video: A New Metric &amp; Challenges. arXiv:1812.01717.</li>
+<li>Ge, S., Mahapatra, A., Parmar, G., Zhu, J.-Y., Huang, J.-B. (2024). On the Content Bias in Fréchet Video Distance. CVPR 2024. arXiv:2404.12391.</li>
+<li>Chong, M. J., Forsyth, D. (2020). Effectively Unbiased FID and Inception Score and Where to Find Them. CVPR 2020. arXiv:1911.07023.</li>
+<li>THUDM (now zai-org). CogVideoX-5b-I2V model card. huggingface.co/zai-org/CogVideoX-5b-I2V (accessed 10 Nov 2026).</li>
+<li>CogVideoX Model Team. The CogVideoX License. huggingface.co/zai-org/CogVideoX-5b-I2V/blob/main/LICENSE (accessed 10 Nov 2026).</li>
+<li>17 U.S.C. § 105 – Subject matter of copyright: United States Government works. law.cornell.edu/uscode/text/17/105.</li>
+<li>Coalition for Content Provenance and Authenticity (C2PA) (2025). Content Credentials: C2PA Technical Specification, version 2.2. spec.c2pa.org/specifications.</li>
+<li>NIST (2023). Artificial Intelligence Risk Management Framework (AI RMF 1.0). doi:10.6028/NIST.AI.100-1.</li>
+<li>Deng, J., Guo, J., Zhou, Y., Yu, J., Kotsia, I., Zafeiriou, S. (2019). RetinaFace: Single-stage Dense Face Localisation in the Wild. arXiv:1905.00641.</li>
+</ol>
+
+<section class="appendix">
+<h2>Appendix. AI-generated proposal</h2>
+<div class="box">
+<b>Tool / model:</b> ChatGPT 6.1 sol<br>
+<b>Prompt:</b> "Propose a practical educational/research system for clearly labelled, silent synthetic videos depicting Donald Trump. Cover data, identity and temporal consistency, hardware budget, evaluation, and misuse controls; state assumptions for a short 720×480, 8 fps output."
+</div>
+<div class="ai-response">
+<p><b>Educational and Research System for Clearly Labelled, Silent Synthetic Videos Depicting Donald Trump</b></p>
+<p>Use a <b>reference-image-to-video system with a frozen pretrained model</b>, followed by automated checks and human approval. This is practical for a small research project and gives a clear baseline for studying identity drift and motion consistency.</p>
+<p>Assume a <b>six-second clip: 48 frames, 720×480 pixels, 8 fps</b>, one person, a fixed camera, neutral background, and modest movement such as blinking or turning slightly. Every frame carries <b>“AI-GENERATED — NOT REAL FOOTAGE.”</b> The file contains no audio track. The intended use is classroom demonstration or controlled research.</p>
+<p><b>1. Data and provenance</b></p>
+<p>Collect roughly 20–40 rights-cleared reference photographs covering frontal and slight side views, with consistent apparent age. Record source URLs, licenses, dates, and permitted uses; publicly accessible images are not automatically reusable.</p>
+<p>Split references by original photo session or event, keeping near-duplicates together. Reserve several sessions for evaluation. Use one approved portrait to condition each generation; the remaining images support identity checks. This baseline requires <b>no identity-specific training dataset</b>.</p>
+<p>Maintain a manifest linking each output to its reference, prompt, model version, settings, seed, and review decision. Document that the pretrained model’s original training-data provenance may be incomplete.</p>
+<p><b>2. Identity and temporal consistency</b></p>
+<p>A concrete baseline is CogVideoX-5B-I2V (huggingface.co/THUDM/CogVideoX-5b-I2V). Its documented example produces <b>49 frames at 720×480 and exports at 8 fps</b>; retain 48 frames for an exact six-second deliverable. Review its model license before adoption.</p>
+<p>Generate the entire shot jointly from the reference portrait. Keep appearance, lighting, clothing, and background fixed, and request only modest movement. Consistency comes primarily from image conditioning and the model’s temporal processing; a fixed seed supports reproducibility but does not guarantee identity.</p>
+<p>Reject clips with changing facial proportions, unstable hair or clothing, disappearing features, or substantial unintended mouth movement. Use face alignment for evaluation. Independently replacing or restoring each face can introduce flicker.</p>
+<p><b>3. Hardware and budget</b></p>
+<table>
+<tr>
+<th>Resource</th>
+<th>Practical starting allocation</th>
+</tr>
+<tr>
+<td>GPU</td>
+<td>One NVIDIA GPU with 24 GB VRAM; 48 GB provides more flexibility</td>
+</tr>
+<tr>
+<td>Computer</td>
+<td>64 GB RAM and 1–2 TB SSD</td>
+</tr>
+<tr>
+<td>Memory controls</td>
+<td>CPU offloading and VAE tiling; test quantization separately</td>
+</tr>
+<tr>
+<td>Local purchase allowance</td>
+<td>Approximately US$2,000–3,500 for a complete workstation</td>
+</tr>
+<tr>
+<td>Cloud pilot allowance</td>
+<td>Reserve 20 GPU-hours; at an assumed US$1–4/hour, US$20–80</td>
+</tr>
+</table>
+<p>These are planning allowances, not current vendor quotes. Benchmark the first five clips to establish runtime, peak memory, and <b>cost per accepted clip</b>, including rejected attempts. Published minimum-memory figures depend heavily on offloading and do not establish comfortable operating requirements.</p>
+<p>Keep fine-tuning outside the initial scope: it adds data, memory, and evaluation costs before the baseline’s limitations are known.</p>
+<p><b>4. Evaluation</b></p>
+<p>Run approximately 30 generations across several approved portraits, motion prompts, and seeds. Retain failed generations in the research results.</p>
+<ul class="plain">
+<li><b>Identity:</b> Compare face embeddings against held-out photographs, reporting median similarity, worst-frame similarity, and drift across time. Calibrate thresholds using real same-person and different-person examples; there is no universal cosine cutoff.</li>
+<li><b>Temporal quality:</b> Measure motion-compensated perceptual differences in visible regions, landmark stability, and background flicker. Check that low motion scores do not merely reward frozen images.</li>
+<li><b>Human review:</b> Have two reviewers independently score recognizability, facial integrity, motion plausibility, and label readability.</li>
+<li><b>Delivery:</b> Verify exactly 48 frames, resolution, constant frame rate, absence of an audio stream, and readable disclosure throughout.</li>
+</ul>
+<p>Human approval is required for every released clip. Report measured acceptance rates rather than promising identity preservation.</p>
+<p><b>5. Misuse controls</b></p>
+<p>Restrict the interface to approved neutral scenes and motions. Exclude fabricated speeches, endorsements, news events, and realistic claims that Trump performed a particular consequential act.</p>
+<p>Burn disclosure into the frames after generation, add a visible research identifier, and include signed provenance metadata where supported. Test label readability after resizing and recompression. Labels and metadata help establish origin but cannot prevent deliberate removal.</p>
+<p>Keep generation access authenticated, rate-limited, and logged. Publish approved labelled outputs with their limitations; restrict access to unlabelled intermediates and any future identity-specific weights. Provide a reporting and withdrawal process.</p>
+<p>The first research question should be narrow: <b>How reliably does reference conditioning preserve recognizable identity during modest movement, and how does that reliability change across poses and seeds?</b> This produces a useful, measurable educational system within a single-GPU budget.</p>
+</div>
+</section>
+
+
+</body>
+</html>

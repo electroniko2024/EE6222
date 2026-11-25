@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>作业 2 – 视频生成网络（中文对照版）</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="zh">
+
+<h1>视频生成网络设计</h1>
+
+<p>本方案设计一个小型研究原型，生成唐纳德·特朗普在中性场景中的无声短片，比如走过舞台或在讲台前做手势。这些片段用于教学，帮助说明视频生成的原理，以及合成媒体应该怎样标注。因此系统不带音频，也不呈现真实或虚构的新闻事件，导出的每个片段都有可见标记。</p>
+
+<h2>第一部分：我的方案</h2>
+
+<h3>1.1 数据</h3>
+<p>素材从两个渠道收集。主要来源是美国联邦政府的官方录像，联邦雇员在履行职务时创作的作品不受美国版权保护<sup>[17]</sup>。但政府网页有时会嵌入联合采访或电视台的画面，所以每个片段使用前都要核查。第二个来源是新闻档案或素材库中获得研究授权的视频，用来补足数量。网上爬取的转载不用。每个片段都记录来源、权利人、许可或法律依据、收集日期和允许的用途。肖像权和平台条款不在版权范围内，所以开始收集前，方案要先通过学校的伦理或法律审查。</p>
+<p>过滤后的目标是 300 到 1,000 个 6 到 10 秒的片段，总长约半小时到三小时。片段来自至少 40 个不同事件，覆盖不同年份、机位和光照，另外准备 20 到 50 张清晰的参考静帧。主干模型只用低秩适配器微调，所以多样性比数量更重要。最终数量取决于能拿到授权的素材有多少。</p>
+<p>预处理由一串常用工具完成。FFmpeg 去掉音频，PySceneDetect 把素材切成镜头。RetinaFace<sup>[20]</sup> 检测并跟踪人脸，再用人脸嵌入<sup>[6]</sup> 把跟踪到的人脸和参考静帧比对，确认是同一个人，拿不准的交给人工判断。人脸太小或模糊、遮挡严重、带内嵌字幕的片段都会被剔除。剩下的片段重采样到 8 fps，再截成主干模型的原生格式，即 49 帧、720×480，约 6 秒<sup>[2]</sup>。完整画面用于训练，人脸框的位置另存，身份损失据此裁剪。描述文字由视觉语言模型生成，只写画面里看得到的内容，比如景别、光照、服装和动作。我会抽查这些描述，删掉任何引语或政治主张。</p>
+<p>数据按事件和录制日期以 70/15/15 划分，同一场演讲的画面不会同时出现在训练集和测试集里。各集合之间用感知哈希去掉近似重复的帧。另有两套提示词完全不参与训练：一套是没见过的场景和镜头运动，用于评估；另一套是红队请求，系统应当拒绝。</p>
+
+<h3>1.2 网络架构</h3>
+<figure>
+<svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei, Arial, sans-serif" font-size="11">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#456"/></marker></defs>
+  <rect x="8" y="14" width="128" height="40" rx="5" fill="#e8eff4" stroke="#6b8799"/><text x="72" y="30" text-anchor="middle" font-weight="bold">文本提示词</text><text x="72" y="45" text-anchor="middle" font-size="9.5">（白名单模板）</text>
+  <rect x="8" y="78" width="128" height="40" rx="5" fill="#e8eff4" stroke="#6b8799"/><text x="72" y="94" text-anchor="middle" font-weight="bold">参考静帧</text><text x="72" y="109" text-anchor="middle" font-size="9.5">（已授权，1–4 张）</text>
+  <rect x="8" y="142" width="128" height="40" rx="5" fill="#e8eff4" stroke="#6b8799"/><text x="72" y="158" text-anchor="middle" font-weight="bold">噪声 + 随机种子</text><text x="72" y="173" text-anchor="middle" font-size="9.5">（视频潜变量）</text>
+  <rect x="170" y="14" width="140" height="40" rx="5" fill="#fff" stroke="#6b8799"/><text x="240" y="30" text-anchor="middle" font-weight="bold">文本编码器</text><text x="240" y="45" text-anchor="middle" font-size="9.5">（冻结，来自主干）</text>
+  <rect x="170" y="70" width="140" height="56" rx="5" fill="#fdf1e3" stroke="#c98a3c"/><text x="240" y="86" text-anchor="middle" font-weight="bold">身份编码器</text><text x="240" y="100" text-anchor="middle" font-size="9.5">ArcFace<tspan baseline-shift="super" font-size="7">[6]</tspan> + CLIP 图像<tspan baseline-shift="super" font-size="7">[10]</tspan></text><text x="240" y="114" text-anchor="middle" font-size="9.5">→ 投影网络 → 身份 token</text>
+  <rect x="345" y="10" width="200" height="176" rx="6" fill="#eef6ee" stroke="#5c8f5c"/>
+  <text x="445" y="28" text-anchor="middle" font-weight="bold">CogVideoX-5B 扩散 Transformer<tspan baseline-shift="super" font-size="7">[1]</tspan></text>
+  <text x="445" y="46" text-anchor="middle" font-size="9.5">文本 + 视频 token，三维时空</text>
+  <text x="445" y="58" text-anchor="middle" font-size="9.5">全注意力（基础权重冻结）</text>
+  <rect x="360" y="70" width="170" height="30" rx="4" fill="#fff" stroke="#5c8f5c"/><text x="445" y="89" text-anchor="middle" font-size="9.5">+ 注意力投影上的 LoRA<tspan baseline-shift="super" font-size="7">[4]</tspan></text>
+  <rect x="360" y="108" width="170" height="40" rx="4" fill="#fdf1e3" stroke="#c98a3c"/><text x="445" y="124" text-anchor="middle" font-size="9.5">+ 零初始化身份交叉注意力</text><text x="445" y="138" text-anchor="middle" font-size="9.5">（IP-Adapter 风格<tspan baseline-shift="super" font-size="7">[5]</tspan>）</text>
+  <text x="445" y="172" text-anchor="middle" font-size="9.5">全部 49 帧共享同一组身份 token</text>
+  <rect x="580" y="14" width="172" height="40" rx="5" fill="#fff" stroke="#6b8799"/><text x="666" y="30" text-anchor="middle" font-weight="bold">三维 VAE 解码器</text><text x="666" y="45" text-anchor="middle" font-size="9.5">49 帧 · 720×480 · 8 fps</text>
+  <rect x="580" y="78" width="172" height="52" rx="5" fill="#f6e9ef" stroke="#a5587a"/><text x="666" y="95" text-anchor="middle" font-weight="bold">导出关卡</text><text x="666" y="109" text-anchor="middle" font-size="9.5">逐帧内嵌“AI 生成”标记</text><text x="666" y="122" text-anchor="middle" font-size="9.5">+ C2PA 清单<tspan baseline-shift="super" font-size="7">[18]</tspan> + 日志</text>
+  <rect x="580" y="146" width="172" height="36" rx="5" fill="#e8eff4" stroke="#6b8799"/><text x="666" y="168" text-anchor="middle" font-weight="bold">带标记的无声片段</text>
+  <line x1="136" y1="34" x2="168" y2="34" stroke="#456" marker-end="url(#a)"/>
+  <line x1="136" y1="98" x2="168" y2="98" stroke="#456" marker-end="url(#a)"/>
+  <line x1="310" y1="34" x2="343" y2="34" stroke="#456" marker-end="url(#a)"/>
+  <line x1="310" y1="110" x2="358" y2="126" stroke="#456" marker-end="url(#a)"/>
+  <line x1="136" y1="162" x2="343" y2="162" stroke="#456" marker-end="url(#a)"/>
+  <line x1="545" y1="34" x2="578" y2="34" stroke="#456" marker-end="url(#a)"/>
+  <line x1="666" y1="54" x2="666" y2="76" stroke="#456" marker-end="url(#a)"/>
+  <line x1="666" y1="130" x2="666" y2="144" stroke="#456" marker-end="url(#a)"/>
+  <rect x="8" y="204" width="744" height="38" rx="5" fill="#fafafa" stroke="#999" stroke-dasharray="4 3"/>
+  <text x="20" y="220" font-weight="bold">仅训练时：</text>
+  <text x="20" y="235" font-size="9.5">L = L_扩散 + λ_id·L_id（在低噪声步对预测的干净帧计算 ArcFace 余弦距离）+ λ_t·L_时间（RAFT 光流扭曲误差<tspan baseline-shift="super" font-size="7">[8]</tspan>，可选，做消融）</text>
+  <line x1="445" y1="186" x2="445" y2="202" stroke="#999" stroke-dasharray="3 2"/>
+</svg>
+</figure>
+<div class="caption">图 1. 方案架构。橙色为身份通路，绿色为带可训练适配器的预训练主干，粉色为披露步骤。</div>
+<p>我会在开源的文本生成视频模型 CogVideoX-5B<sup>[1, 2]</sup> 上进行改造。它用三维 VAE 在空间和时间上压缩视频，再由扩散 Transformer 通过时空全注意力同时处理文本和视频 token，生成 720×480 的 49 帧视频。选择文本生成视频模型，是因为场景需要通过受限的提示词来控制。前期测试可以用成本低得多的 Wan2.1-T2V-1.3B<sup>[3]</sup>（Apache-2.0，480p）。</p>
+<p>模型有三个输入：按批准模板写成的提示词、一到四张已授权的参考静帧，以及一个随机种子。输出是一段无声的 49 帧片段。保存之前，导出环节会在每一帧烧录可见标记，并附上 C2PA 来源清单<sup>[18]</sup>。</p>
+<p>身份方面，参考静帧经过两个编码器。ArcFace<sup>[6]</sup> 给出紧凑的身份嵌入，CLIP 图像编码器<sup>[10]</sup> 从人脸裁剪图中补充外观细节。一个小型投影网络把这些特征转成身份 token。CogVideoX 本身没有交叉注意力层，所以身份 token 通过新增的交叉注意力层进入 Transformer，这些层参照了 IP-Adapter 的解耦交叉注意力<sup>[5]</sup>。新增层初始化为零，所以训练刚开始时，模型的行为和原始主干完全一样。之后再用注意力投影上的 LoRA<sup>[4]</sup> 让主干适应该人物的外观。我还会测试已发表的 ConsisID<sup>[9]</sup> 作为外部对照，它是一个无需微调就能保持身份的文本生成视频模型。</p>
+<p>时间一致性有一部分是主干自带的，因为它的联合注意力本来就让每一帧都能看到其他所有帧。身份 token 也有帮助，因为全部 49 帧接收的是完全相同的身份信号。在此基础上我会尝试一个扭曲损失：解码一小段预测帧并降采样，用 RAFT<sup>[8]</sup> 在真实片段上估计出的光流对每一帧做扭曲，再惩罚两者的差异。只有消融实验证明它有用时，这项损失才保留在最终模型中。</p>
+<div class="eq">L = L<sub>diff</sub> + λ<sub>id</sub> · (1 − cos(f<sub>ArcFace</sub>(x̂<sub>0</sub>), e<sub>ref</sub>)) + λ<sub>t</sub> · L<sub>warp</sub></div>
+<p>身份项只在低噪声时间步计算，因为噪声大的时候，预测出的干净帧 x̂<sub>0</sub> 里还看不出可辨认的人脸。两项附加损失都要用解码后的像素，而通过 VAE 解码器反向传播会在 LoRA 训练之外再占一部分显存，所以它们共用同一批解码出的少量帧，并且只在一部分训练步上计算。身份项的权重设得较小，因为过度追求人脸相似度往往会让表情变僵。出于同样的原因，测试时改用另一个网络 FaceNet<sup>[7]</sup> 衡量身份，避免用训练时对照的同一个网络来给模型打分。</p>
+
+<h3>1.3 资源</h3>
+<p>选择 80 GB 显卡是依据 CogVideoX-5B 的模型卡：LoRA 微调在批次大小为 1 时每卡约需 63 GB，批次大小为 2 时需要 80 GB<sup>[2]</sup>。</p>
+<table>
+<tr><th>项目</th><th>计划</th></tr>
+<tr><td>GPU</td><td>4 张 80 GB（A100 或 H100），可以并行跑多组适配器训练和消融实验；试验阶段另用 1 张</td></tr>
+<tr><td>软件</td><td>PyTorch、Diffusers、PEFT、FFmpeg、PySceneDetect、InsightFace、torchvision（RAFT）、C2PA 工具和实验记录工具</td></tr>
+<tr><td>预训练模型</td><td>CogVideoX-5B、Wan2.1-T2V-1.3B、InsightFace 的 ArcFace 与 RetinaFace（许可限非商业研究，与本项目相符）、CLIP、RAFT 和 FaceNet</td></tr>
+<tr><td>计算量</td><td>4 卡 × 24–72 小时 = 96–288 GPU 小时，按每 GPU 小时 2–5 美元计约 200–1,500 美元</td></tr>
+</table>
+
+<h3>1.4 设计依据</h3>
+<p>我选择改造预训练模型，而不是从头训练。LoRA 和身份模块只训练很小一部分参数，课程预算负担得起。缺点是系统会保留主干的局限：片段只有 6 秒、分辨率 720×480，主干原有的偏差也会带过来。这些安排的前提是有 80 GB 显卡可用、能拿到足够的授权素材，并且伦理审查通过。</p>
+<p>身份和内容分开处理：身份 token 负责“是谁”，文本负责“发生什么”。训练视角少的时候，适配器可能照搬参考图的姿态或表情，所以我会比较仅适配器、仅 LoRA 和两者结合三个版本。按事件划分数据会减少训练数据，但如果随机抽帧划分，近似的帧就会漏进测试集，让分数虚高。</p>
+<p>片段无声，提示词来自批准清单，涉及真实事件或选举的请求会被拒绝。每次导出都带有烧录标记、C2PA 元数据和一条日志记录，风险管理参照 NIST AI RMF<sup>[19]</sup>。有心人可以去掉标记和元数据，所以系统的访问权限也只开放给研究小组。</p>
+
+<h3>1.5 评估</h3>
+<table>
+<tr><th>方面</th><th>指标</th><th>作用</th></tr>
+<tr><td>身份</td><td>与留出静帧的 FaceNet 余弦相似度，逐帧计算并看跨帧变化</td><td>与训练损失使用不同的网络</td></tr>
+<tr><td>时间</td><td>RAFT 扭曲误差；VBench 的主体一致性、时间闪烁和运动平滑度<sup>[11]</sup></td><td>帧间连贯性</td></tr>
+<tr><td>运动</td><td>VBench 动态程度<sup>[11]</sup></td><td>找出几乎不动的片段</td></tr>
+<tr><td>提示词</td><td>CLIP 文本–帧相似度<sup>[10]</sup></td><td>检查场景是否符合提示词</td></tr>
+<tr><td>分布</td><td>在留出事件上计算 FVD<sup>[12]</sup></td><td>只作辅助参考，因为 FVD 偏向单帧质量<sup>[13]</sup>，而且会随样本量变化<sup>[14]</sup></td></tr>
+<tr><td>人工</td><td>至少三名评分者盲测打分</td><td>身份、动作自然度和标记是否清晰</td></tr>
+<tr><td>安全</td><td>红队集上的拒绝率，以及每个导出片段的标记检查</td><td>必须通过</td></tr>
+</table>
+<p>所有版本都在相同的留出事件、提示词和随机种子上测试，包括原始主干、ConsisID，以及四个消融版本：去掉身份损失、去掉扭曲损失、仅用适配器、仅用 LoRA。</p>
+
+<h2>第二部分：AI 辅助方案与批判性比较</h2>
+<p>完成第一部分后，我于 2026 年 11 月 10 日用英文向 ChatGPT 6.1 sol 输入了以下提示词：<i>"Propose a practical educational/research system for clearly labelled, silent synthetic videos depicting Donald Trump. Cover data, identity and temporal consistency, hardware budget, evaluation, and misuse controls; state assumptions for a short 720×480, 8 fps output."</i>（大意：请为明确标注、无声、用于教育或研究的唐纳德·特朗普合成视频提出一套可行的系统，说明数据、身份与时间一致性、硬件预算、评估和滥用防护，并说明输出 720×480、8 fps 短片的假设。）提示词采用了和我的设计相同的输出格式，所以两份方案回答的是同一个题目。它用英文作答，附录是完整的中文译文。</p>
+<p>ChatGPT 提出的是一个冻结的图像生成视频模型，后接自动检查和人工审批。它假设片段长 6 秒，共 48 帧，720×480、8 fps，画面里只有一个人，固定机位、中性背景、小幅动作，每一帧都带有 “AI-GENERATED — NOT REAL FOOTAGE”。数据是 20 到 40 张已清权的照片，按拍摄场次划分，不需要训练集。每个片段由 CogVideoX-5B-I2V 根据一张批准的肖像和一条提示词生成，不做微调。硬件是一张 24 GB GPU，配合 CPU 卸载和 VAE 分块，或者租用 20 个云端 GPU 小时，约 20–80 美元。评估约 30 次生成，失败的也算在内。身份用人脸嵌入和留出照片比对，时间质量用运动补偿差异和关键点稳定性衡量，每个片段由两名审核人评分。滥用防护包括限定场景和动作、烧录标记加签名来源元数据、记录日志并限制频率的访问，以及撤回流程。</p>
+
+<h3>2.1 相同点与不同点</h3>
+<table>
+<tr><th></th><th>我的方案</th><th>ChatGPT 的方案</th><th>比较</th></tr>
+<tr><td>数据</td><td>300–1,000 个授权视频片段和 20–50 张静帧，带肖像审查的权利台账，按事件划分，另有提示词集和红队集</td><td>20–40 张已清权照片，按场次划分，留出部分场次用于评估，每个输出都有清单记录其输入和审核结果</td><td>两者都记录权利信息并按事件划分。ChatGPT 不训练，所以不需要视频，它的逐条输出清单比我的日志更完整</td></tr>
+<tr><td>架构</td><td>文本生成视频的 CogVideoX-5B，加 LoRA 和零初始化的身份交叉注意力，720×480、49 帧</td><td>冻结的 CogVideoX-5B-I2V，以一张肖像和一条提示词为条件，49 帧截为 48 帧，不加任何模块</td><td>模型家族和输出格式相同。我的方案加入了身份 token 和 LoRA，ChatGPT 只靠图像条件，身份不够时没有后备办法</td></tr>
+<tr><td>资源</td><td>4 × 80 GB，96–288 GPU 小时，适配器训练 200–1,500 美元</td><td>1 张 24 GB GPU（48 GB 更好），64 GB 内存，1–2 TB 固态硬盘，工作站 2,000–3,500 美元或云端 20–80 美元</td><td>两份预算覆盖的工作不同，我的是训练，ChatGPT 的是推理。它还列了内存和存储，我漏掉了</td></tr>
+<tr><td>评估</td><td>FaceNet 身份分数、VBench、CLIP、FVD 作为次要指标，至少三名盲评人员，红队测试和消融实验</td><td>约 30 次生成并保留失败结果，身份报告中位数和最差帧并用校准过的阈值，漂移、关键点稳定性，两名审核人，交付检查</td><td>ChatGPT 的身份报告更细致。我的方案有基线、消融和别人可以复现的标准基准</td></tr>
+<tr><td>安全</td><td>无声输出、批准的提示词、可见标记、C2PA、日志和伦理审查</td><td>限定场景和动作，生成后烧录标记，研究编号，签名来源信息，重新压缩后的测试，频率限制，撤回流程</td><td>非常相似。ChatGPT 多了频率限制、重新压缩后的标记测试和撤回流程</td></tr>
+</table>
+
+<h3>2.2 薄弱之处与缺失的细节</h3>
+<ol>
+<li>方案恰好停在身份问题开始出现的地方。24 GB 用于推理是可信的，因为 CogVideoX 的模型卡写明，开启全部显存优化时约需 5 GB，关闭后峰值约为三倍<sup>[2]</sup>。问题出在基线之后。整个方案都依赖图像条件足够好，而它的滥用防护部分已经提到要保护“将来的身份专用权重”。如果图像条件不够，下一步自然是 LoRA 微调，而 I2V 模型卡给出的数字是批次大小为 1 时每卡 78 GB<sup>[15]</sup>。24 GB 或 48 GB 的机器做不到，20 到 40 张静帧也不能用来训练视频模型。ChatGPT 提到了下一步，却没有给它安排硬件、数据和预算。</li>
+<li>评估没有任何比较对象。ChatGPT 只测试一个系统，所以它的结果无法说明参考图条件带来了多少提升，也无法说明其他方法会不会更好，而它自己的研究问题恰恰是参考图条件的效果如何。我在评估部分找过基线、对照条件或标准基准，都没有找到。两名审核人独立评分，但没有计划衡量两人的一致性；30 次生成分散在几张肖像、几条提示词和几个种子上，每种条件只剩寥寥几个片段。它的时间指标思路合理，但定义不够具体，无法复现，比如没有说明用哪种光流方法、哪种感知指标。加入 VBench<sup>[11]</sup> 和一组纯文本对照，就能解决大部分问题。</li>
+<li>许可证检查被留到以后，其实几分钟就能做完。ChatGPT 写的是“采用前先审查模型许可证”。我读了 CogVideoX 的许可证<sup>[16]</sup>：学术研究可免费使用，商业使用需要登记，适用中国法律，并禁止任何“侵犯人身权益”的行为。它没有提到冒充他人或内容标注。这份许可证不会阻止本项目，但肖像问题完全要靠项目自己的法律审查来解决，方案本应把这一点说出来。</li>
+</ol>
+
+<h3>2.3 我会从 ChatGPT 的方案中采纳什么</h3>
+<p>ChatGPT 有几条建议比我原来的更好。最有用的是它的身份报告方式：不只给一个平均相似度，而是报告中位数、最差帧和随时间的漂移，并用同一人和不同人的真实照片对来确定阈值，而不是套用固定的余弦阈值。我的 FaceNet 分数也会这样报告。我还会把失败的生成结果保留在结果中，并报告包含被拒尝试在内的单条合格片段成本。它的逐条输出清单、缩放和重新压缩后的标记可读性测试，以及未加标记的中间结果和身份权重要限制访问这条规定，都是简单的补充，我会直接采用。</p>
+<p>它的冻结基线我会修改后采用。CogVideoX-5B-I2V 和我的主干属于同一家族，输出同样是 720×480、8 fps、49 帧，所以可以和原始主干、ConsisID<sup>[9]</sup> 一起作为第三个无需微调的基线，用相同的指标打分。我会先跑这些基线，只有它们达不到事先定好的阈值时才训练身份适配器。和 ChatGPT 不同的是，我会为这一步准备好适配器设计和 80 GB 的预算。我不会采用它的 24 GB 硬件，这适合它的方案，但不适合我的；评分人员我也会保持三名盲评，而不是两名。它提醒运动分数低可能是在奖励静止的画面，这正是我表里 VBench 动态程度要发现的问题，所以两项会一起报告。</p>
+
+<h2>第三部分：结论</h2>
+<p>我方案里校准过的身份阈值、最差帧分数、重新压缩后的标记测试和单条合格片段成本，都来自 ChatGPT。这些是我原先没想到的实际细节，每一项都让我的结果更难被夸大。在实际搭建时，AI 工具也能节省时间，比如起草预处理和训练脚本、编写评估和红队提示词，以及给训练片段写描述。让 AI 专门找设计中的漏洞，比如某个指标会怎样被“刷分”，也是快速发现问题的办法，ChatGPT 关于静止画面的提醒就是一个例子。</p>
+<p>核查这份回答并不难，因为它点名了真实存在的模型，而且它给出的 CogVideoX-5B-I2V 的帧数、分辨率和帧率都与模型卡一致<sup>[15]</sup>。它的弱点在于遗漏的部分：提到了身份权重，却没有为所需的训练做预算；评估也没有比较对象。这两个问题在任何单独一句话里都看不出来，只有把方案作为整体来读，并对照模型卡和它自己的研究问题，才会浮现。我会把起草工作和容易遗漏的细节交给 AI，设计决策以及对照一手资料的核查由我自己来做。</p>
+
+<h2>参考文献</h2>
+<ol class="refs">
+<li>Yang, Z., Teng, J., Zheng, W., et al. (2025). CogVideoX: Text-to-Video Diffusion Models with an Expert Transformer. ICLR 2025. arXiv:2408.06072.</li>
+<li>THUDM (now zai-org). CogVideoX-5b model card. huggingface.co/zai-org/CogVideoX-5b（访问日期：2026 年 11 月 9 日）.</li>
+<li>Team Wan, et al. (2025). Wan: Open and Advanced Large-Scale Video Generative Models. arXiv:2503.20314; github.com/Wan-Video/Wan2.1.</li>
+<li>Hu, E. J., Shen, Y., Wallis, P., et al. (2022). LoRA: Low-Rank Adaptation of Large Language Models. ICLR 2022. arXiv:2106.09685.</li>
+<li>Ye, H., Zhang, J., Liu, S., Han, X., Yang, W. (2023). IP-Adapter: Text Compatible Image Prompt Adapter for Text-to-Image Diffusion Models. arXiv:2308.06721.</li>
+<li>Deng, J., Guo, J., Xue, N., Zafeiriou, S. (2019). ArcFace: Additive Angular Margin Loss for Deep Face Recognition. CVPR 2019. arXiv:1801.07698.</li>
+<li>Schroff, F., Kalenichenko, D., Philbin, J. (2015). FaceNet: A Unified Embedding for Face Recognition and Clustering. CVPR 2015. arXiv:1503.03832.</li>
+<li>Teed, Z., Deng, J. (2020). RAFT: Recurrent All-Pairs Field Transforms for Optical Flow. ECCV 2020. arXiv:2003.12039.</li>
+<li>Yuan, S., Huang, J., He, X., et al. (2025). Identity-Preserving Text-to-Video Generation by Frequency Decomposition (ConsisID). CVPR 2025. arXiv:2411.17440.</li>
+<li>Radford, A., Kim, J. W., Hallacy, C., et al. (2021). Learning Transferable Visual Models From Natural Language Supervision (CLIP). ICML 2021. arXiv:2103.00020.</li>
+<li>Huang, Z., He, Y., Yu, J., Zhang, F., et al. (2024). VBench: Comprehensive Benchmark Suite for Video Generative Models. CVPR 2024. arXiv:2311.17982.</li>
+<li>Unterthiner, T., van Steenkiste, S., Kurach, K., et al. (2018). Towards Accurate Generative Models of Video: A New Metric &amp; Challenges. arXiv:1812.01717.</li>
+<li>Ge, S., Mahapatra, A., Parmar, G., Zhu, J.-Y., Huang, J.-B. (2024). On the Content Bias in Fréchet Video Distance. CVPR 2024. arXiv:2404.12391.</li>
+<li>Chong, M. J., Forsyth, D. (2020). Effectively Unbiased FID and Inception Score and Where to Find Them. CVPR 2020. arXiv:1911.07023.</li>
+<li>THUDM (now zai-org). CogVideoX-5b-I2V model card. huggingface.co/zai-org/CogVideoX-5b-I2V（访问日期：2026 年 11 月 10 日）.</li>
+<li>CogVideoX Model Team. The CogVideoX License. huggingface.co/zai-org/CogVideoX-5b-I2V/blob/main/LICENSE（访问日期：2026 年 11 月 10 日）.</li>
+<li>17 U.S.C. § 105 – Subject matter of copyright: United States Government works. law.cornell.edu/uscode/text/17/105.</li>
+<li>Coalition for Content Provenance and Authenticity (C2PA) (2025). Content Credentials: C2PA Technical Specification, version 2.2. spec.c2pa.org/specifications.</li>
+<li>NIST (2023). Artificial Intelligence Risk Management Framework (AI RMF 1.0). doi:10.6028/NIST.AI.100-1.</li>
+<li>Deng, J., Guo, J., Zhou, Y., Yu, J., Kotsia, I., Zafeiriou, S. (2019). RetinaFace: Single-stage Dense Face Localisation in the Wild. arXiv:1905.00641.</li>
+</ol>
+
+<section class="appendix">
+<h2>附录：AI 生成的方案</h2>
+<div class="box">
+<b>工具 / 模型：</b>ChatGPT 6.1 sol<br>
+<b>提示词：</b>见第二部分。
+</div>
+<div class="ai-response">
+<p><b>明确标注的唐纳德·特朗普无声合成视频：教育与研究系统</b></p>
+<p>采用<b>基于冻结预训练模型的参考图像生成视频系统</b>，之后进行自动检查和人工审批。这对小型研究项目来说切实可行，也为研究身份漂移和运动一致性提供了清晰的基线。</p>
+<p>假设<b>片段长六秒：48 帧，720×480 像素，8 fps</b>，单人、固定机位、中性背景，动作幅度适中，比如眨眼或轻微转头。每一帧都带有 <b>“AI-GENERATED — NOT REAL FOOTAGE.”</b> 文件不含音轨。预期用途是课堂演示或受控研究。</p>
+<p><b>1. 数据与来源</b></p>
+<p>收集约 20–40 张已清权的参考照片，覆盖正面和轻微侧面，表观年龄保持一致。记录来源网址、许可、日期和允许的用途；可以公开访问的图像并不自动可以复用。</p>
+<p>按原始拍摄场次或事件划分参考图，近似重复的图片放在一起。留出若干场次用于评估。每次生成用一张批准的肖像作为条件；其余图像用于身份检查。这个基线<b>不需要针对该身份的训练数据集</b>。</p>
+<p>维护一份清单，把每个输出与其参考图、提示词、模型版本、设置、种子和审核结论关联起来。记录在案：预训练模型原始训练数据的来源可能不完整。</p>
+<p><b>2. 身份与时间一致性</b></p>
+<p>一个具体的基线是 CogVideoX-5B-I2V（huggingface.co/THUDM/CogVideoX-5b-I2V）。其文档示例生成 <b>720×480 的 49 帧，并以 8 fps 导出</b>；保留 48 帧即可得到正好六秒的成品。采用前先审查其模型许可证。</p>
+<p>根据参考肖像一次性联合生成整个镜头。保持外观、光照、服装和背景不变，只要求适度的动作。一致性主要来自图像条件和模型自身的时间处理；固定种子有助于复现，但不能保证身份。</p>
+<p>剔除面部比例变化、头发或服装不稳定、特征消失或出现明显非预期嘴部动作的片段。评估时使用人脸对齐。逐帧单独替换或修复人脸可能引入闪烁。</p>
+<p><b>3. 硬件与预算</b></p>
+<table>
+<tr><th>资源</th><th>实际起步配置</th></tr>
+<tr><td>GPU</td><td>一张 24 GB 显存的 NVIDIA GPU；48 GB 更灵活</td></tr>
+<tr><td>计算机</td><td>64 GB 内存和 1–2 TB 固态硬盘</td></tr>
+<tr><td>显存控制</td><td>CPU 卸载和 VAE 分块；量化单独测试</td></tr>
+<tr><td>本地采购额度</td><td>整台工作站约 2,000–3,500 美元</td></tr>
+<tr><td>云端试点额度</td><td>预留 20 GPU 小时；按假设的每小时 1–4 美元计，20–80 美元</td></tr>
+</table>
+<p>这些是规划额度，不是当前供应商报价。对前五个片段做基准测试，确定运行时间、显存峰值和<b>单条合格片段成本</b>，被拒的尝试也计算在内。公布的最低显存数字很大程度上依赖卸载，并不代表舒适的运行要求。</p>
+<p>初始范围不包括微调：在弄清基线的局限之前，微调会增加数据、显存和评估成本。</p>
+<p><b>4. 评估</b></p>
+<p>在若干批准的肖像、动作提示词和种子上运行约 30 次生成。失败的生成结果保留在研究结果中。</p>
+<ul class="plain">
+<li><b>身份：</b>将人脸嵌入与留出的照片比对，报告相似度中位数、最差帧相似度以及随时间的漂移。用真实的同一人和不同人样本校准阈值；不存在通用的余弦阈值。</li>
+<li><b>时间质量：</b>测量可见区域的运动补偿感知差异、关键点稳定性和背景闪烁。检查运动分数低是否只是在奖励静止画面。</li>
+<li><b>人工审核：</b>由两名审核人独立评分可辨认度、面部完整性、动作合理性和标记可读性。</li>
+<li><b>交付：</b>核验正好 48 帧、分辨率、恒定帧率、无音频流，以及全程可读的披露标记。</li>
+</ul>
+<p>每个发布的片段都需要人工批准。报告实测的通过率，而不是承诺能保持身份。</p>
+<p><b>5. 滥用防护</b></p>
+<p>界面仅限批准的中性场景和动作。排除伪造的讲话、背书、新闻事件，以及声称特朗普做过某个重大行为的逼真内容。</p>
+<p>生成后把披露标记烧录进画面，加上可见的研究编号，并在支持的情况下附带签名的来源元数据。测试缩放和重新压缩后标记的可读性。标记和元数据有助于确认来源，但无法阻止有意删除。</p>
+<p>生成功能需要身份验证、限制频率并记录日志。发布经批准、带标记的输出，并说明其局限；限制访问未加标记的中间结果和将来任何身份专用权重。提供举报和撤回流程。</p>
+<p>第一个研究问题应当范围窄：<b>在适度动作下，参考图条件保持可辨认身份的可靠程度如何？这种可靠程度在不同姿态和种子之间如何变化？</b>这样能在单 GPU 预算内得到一个有用、可衡量的教育系统。</p>
+</div>
+</section>
+
+
+</body>
+</html>
